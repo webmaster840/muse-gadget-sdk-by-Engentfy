@@ -70,6 +70,9 @@ extern "C" {
 #include "muse_link.h"
 #include "muse_settings.h"
 #include "muse_wifi.h"
+#if CONFIG_MUSE_ELEVENLABS_TTS
+#include "muse_elevenlabs.h"
+#endif
 }
 #include "muse_chat_priv.h"
 
@@ -966,6 +969,9 @@ static void turn_finish(void)
     s_turn.tts_msg = -1;
     s_turn.silent = false;
     s_turn.mp3_len = 0;
+#if CONFIG_MUSE_ELEVENLABS_TTS
+    muse_el_cancel();
+#endif
 }
 
 static void turn_fail(const char *why)
@@ -1533,6 +1539,25 @@ static void start_tts(void)
          * end. decode() plays it at the speaker's volume, captions following,
          * and finishes the message once it's drained.
          */
+#if CONFIG_MUSE_ELEVENLABS_TTS
+        /* ElevenLabs does the above; pump_tts() feeds its MP3 in. */
+        if (s_turn.texts && muse_settings_speaker_on() && muse_el_start(s_turn.texts + i * TEXT_MAX)) {
+            m.tts = TTS_ACTIVE;
+            s_turn.tts_msg = i;
+            s_turn.silent = false;
+            m.pcm_start = s_turn.pcm_out;
+            m.pcm_frames = 0;
+            s_turn.mp3_len = 0;
+            s_turn.mp3_ended = false;
+            s_turn.kbps = 0;
+            s_turn.down_rate = 0;
+            mp3dec_init(&s_turn.dec);
+            mark(M_TTS);
+            ESP_LOGI(TAG, "speaking message %s (%u chars)", m.id, (unsigned)m.len);
+            show_reply_start(m);
+            return;
+        }
+#endif
         m.pcm_start = s_turn.pcm_out;
         m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
         m.tts = TTS_ACTIVE;
@@ -1588,12 +1613,47 @@ static void pace_silently(void)
     }
 }
 
+#if CONFIG_MUSE_ELEVENLABS_TTS
+/* Moves ElevenLabs' MP3 into the turn's buffer; on a failure with nothing to
+ * play, falls back to showing the message at reading pace. */
+static void pump_tts(void)
+{
+    if (s_turn.mp3_ended) {
+        return;
+    }
+    muse_el_state_t st = muse_el_state();   /* before reading: DONE means all of it is buffered */
+    /* Leave poll_socket() its room, or it stops reading the VM (MP3_POLL_ROOM). */
+    size_t n;
+    while (MP3_BUF - s_turn.mp3_len > MP3_POLL_ROOM &&
+           (n = muse_el_read(s_turn.mp3 + s_turn.mp3_len, MP3_BUF - MP3_POLL_ROOM - s_turn.mp3_len)) > 0) {
+        mark(M_MP3);
+        s_turn.mp3_len += n;
+    }
+    if (st == MUSE_EL_DONE && !muse_el_pending()) {
+        s_turn.mp3_ended = true;
+    } else if (st == MUSE_EL_FAILED) {
+        msg_t &m = s_turn.msgs[s_turn.tts_msg];
+        if (s_turn.pcm_out == m.pcm_start && !s_turn.mp3_len) {
+            m.pcm_frames = (uint32_t)(m.len * MIC_RATE / TEXT_CHARS_PER_S);
+            s_turn.silent = true;
+        } else {
+            s_turn.mp3_ended = true;   /* play what arrived */
+        }
+    }
+}
+#endif
+
 /* Decodes buffered MP3 while the reply buffer has room. */
 static void decode(void)
 {
     if (s_turn.tts_msg < 0) {
         return;
     }
+#if CONFIG_MUSE_ELEVENLABS_TTS
+    if (!s_turn.silent) {
+        pump_tts();
+    }
+#endif
     if (s_turn.silent) {
         pace_silently();
         return;
