@@ -252,6 +252,20 @@ menu "Muse"
             (about 220 KB), which still covers a push-to-talk turn. Board
             overlays with 2 MB of PSRAM turn it on.
 
+    config MUSE_AVATAR_SMOOTH
+        bool "Smoother avatar on large screens"
+        depends on MUSE_ENABLED
+        default n
+        help
+            The default avatar is 64x64 pixel art blown up to the screen. On
+            screens where each of its pixels is 3 or more screen pixels wide,
+            it draws dimmed lines between them so the grid shows, like an old
+            LCD. This leaves them out and draws the avatar at 128x128 instead:
+            a smooth silhouette, a finer outline, fur and dither, with the
+            eyes, mouth and sparkles as before. It takes four times the
+            drawing per frame and 32 KB of PSRAM. Only the default avatar
+            (avatar/muse_pixel.c) reads it.
+
     config MUSE_ELEVENLABS_TTS
         bool "Speak replies with ElevenLabs"
         depends on MUSE_HATCH
