@@ -140,11 +140,18 @@ idf_component_register(
     SRCS ${srcs}
     INCLUDE_DIRS "."
     EMBED_FILES ${embed}
+    EMBED_TXTFILES ${embed_txt}   # NUL-terminated, as mbedTLS wants PEM
     LDFRAGMENTS "linker.lf"   # CONFIG_MUSE_STATIC_BUFFERS_IN_PSRAM
     WHOLE_ARCHIVE   # muse_lv_mem.c provides symbols only LVGL references
     REQUIRES esp_driver_gpio esp_driver_i2c
     PRIV_REQUIRES ${muse_priv_requires}
 )
+
+if(CONFIG_MUSE_AVATAR_SMOOTH)
+    # avatar/muse_pixel.c: no dimmed grid lines between the avatar's cells, and
+    # drawn at twice the grid's resolution.
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE MUSE_PIXEL_GRID=0 MUSE_PIXEL_SS=2)
+endif()
 
 if(CONFIG_MUSE_ENABLED)
     # LVGL spins forever on a failed assert unless LV_ASSERT_HANDLER is set,

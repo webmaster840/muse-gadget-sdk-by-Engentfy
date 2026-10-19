@@ -96,8 +96,27 @@ static bool s_scheme_init;
 static uint16_t s_pal[C_COUNT];
 static uint16_t s_pal_dim[C_COUNT];
 
-static uint8_t s_fb[W * H];
-static uint8_t s_mask[W * H];
+/*
+ * The framebuffer can be finer than the grid (MUSE_PIXEL_SS, from
+ * CONFIG_MUSE_AVATAR_SMOOTH): SS x SS pixels to each grid cell. The scene is
+ * laid out in grid units all the same; the body, its outline, fur and dither,
+ * the aura and the shadow are drawn per fine pixel, and the small sprites
+ * (eyes, mouth, sparkles...) as SS x SS blocks, so they keep their look.
+ */
+#ifndef MUSE_PIXEL_SS
+#define MUSE_PIXEL_SS 1
+#endif
+#define SS MUSE_PIXEL_SS
+#define R (W * SS)   /* the framebuffer's side; the screen map holds 7 bits of it */
+_Static_assert(R <= 128, "muse_pixel_set_size's map has 7 bits per pixel");
+#if SS > 1 && defined(ESP_PLATFORM)
+#include "esp_attr.h"
+#define FB_ATTR EXT_RAM_BSS_ATTR   /* 32 KB: PSRAM, not the internal RAM Wi-Fi needs */
+#else
+#define FB_ATTR
+#endif
+FB_ATTR static uint8_t s_fb[R * R];
+FB_ATTR static uint8_t s_mask[R * R];
 
 static const uint8_t BAYER4[4][4] = {
     { 0, 8, 2, 10 },
@@ -225,17 +244,28 @@ static void update_palette(const scheme_t *target, float dt)
  * Primitive helpers
  * ------------------------------------------------------------------------- */
 
+/* A framebuffer pixel, in fine units. */
+static inline void fpx(int x, int y, uint8_t c)
+{
+    if ((unsigned)x < R && (unsigned)y < R) {
+        s_fb[y * R + x] = c;
+    }
+}
+
+/* A grid cell: SS x SS framebuffer pixels. */
 static inline void px(int x, int y, uint8_t c)
 {
-    if ((unsigned)x < W && (unsigned)y < H) {
-        s_fb[y * W + x] = c;
+    for (int j = 0; j < SS; j++) {
+        for (int i = 0; i < SS; i++) {
+            fpx(x * SS + i, y * SS + j, c);
+        }
     }
 }
 
 static inline uint8_t get_px(int x, int y)
 {
     if ((unsigned)x < W && (unsigned)y < H) {
-        return s_fb[y * W + x];
+        return s_fb[y * SS * R + x * SS];
     }
     return C_BG;
 }
@@ -351,20 +381,20 @@ static float eyes_update(const muse_pose_t *p, float dt)
 
 static void draw_aura(float cx, float cy, float radius, float strength)
 {
-    int x0 = (int)(cx - radius - 1), x1 = (int)(cx + radius + 1);
-    int y0 = (int)(cy - radius - 1), y1 = (int)(cy + radius + 1);
-    /* Distances in 1/16 px; the root of d2 / r2 comes from the table. */
+    /* In fine pixels; distances in 1/16 of a grid cell, the root of d2 / r2 from the table. */
+    int x0 = (int)(cx - radius - 1) * SS, x1 = (int)(cx + radius + 1) * SS + SS - 1;
+    int y0 = (int)(cy - radius - 1) * SS, y1 = (int)(cy + radius + 1) * SS + SS - 1;
     int32_t cx16 = (int32_t)(cx * 16), r2 = (int32_t)(radius * radius * 256);
     int32_t to_idx = (int32_t)((float)SQRT_LUT_N * 65536 / r2);
     int32_t str = QF(strength);
     for (int y = y0; y <= y1; y++) {
-        int32_t dy = (int32_t)((y + 0.5f - cy) * 1.1f * 16);
+        int32_t dy = (int32_t)(((y + 0.5f) / SS - cy) * 1.1f * 16);
         int32_t dy2 = dy * dy;
         if (dy2 >= r2) {
             continue;
         }
         for (int x = x0; x <= x1; x++) {
-            int32_t dx = x * 16 + 8 - cx16;
+            int32_t dx = (x * 16 + 8) / SS - cx16;
             int32_t d2 = dx * dx + dy2;
             if (d2 >= r2) {
                 continue;
@@ -372,9 +402,9 @@ static void draw_aura(float cx, float cy, float radius, float strength)
             int32_t i = ((ONE - s_sqrt[(d2 * to_idx) >> 16]) * str) >> Q;
             int32_t b = bayer_q(x, y);
             if (i > QF(0.55f) + ((b * QF(0.35f)) >> Q)) {
-                px(x, y, C_AURA2);
+                fpx(x, y, C_AURA2);
             } else if (i > (b * QF(0.9f)) >> Q) {
-                px(x, y, C_AURA1);
+                fpx(x, y, C_AURA1);
             }
         }
     }
@@ -403,12 +433,13 @@ static void draw_rings(float cx, float cy, float t, float level, float speed)
 
 static void draw_shadow(float cx, float y, float half_w)
 {
-    for (int row = 0; row < 3; row++) {
+    for (int fy = (int)y * SS; fy < ((int)y + 3) * SS; fy++) {   /* three grid rows, in fine pixels */
+        int row = fy / SS - (int)y;
         float hw = half_w * (row == 1 ? 1.0f : 0.72f);
-        for (int x = iround(cx - hw); x <= iround(cx + hw); x++) {
-            float edge = fabsf(x + 0.5f - cx) / hw;
-            if (bayer(x, (int)y + row) > edge * 0.8f) {
-                px(x, (int)y + row, C_SHADOW);
+        for (int x = iround(cx - hw) * SS; x < (iround(cx + hw) + 1) * SS; x++) {
+            float edge = fabsf((x + 0.5f) / SS - cx) / hw;
+            if (bayer(x, fy) > edge * 0.8f) {
+                fpx(x, fy, C_SHADOW);
             }
         }
     }
@@ -528,31 +559,32 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
         limb_setup(&arms[i], 2.9f, 5.2f, &arm_q[i]);
         limb_setup(&feet[i], 4.4f, 2.6f, &foot_q[i]);
     }
-    /* Only rows/columns that can hold the avatar are shaded. */
-    int x0 = (int)(j->cx - j->a * 1.1f - 8), x1 = (int)(j->cx + j->a * 1.1f + 8);
-    int y0 = (int)(j->cy - j->b - 8), y1 = (int)(j->cy + j->b + 5);
+    /* Only rows/columns that can hold the avatar are shaded, in fine pixels:
+     * x and y below are framebuffer pixels, fx and fy their centres in grid units. */
+    int x0 = (int)(j->cx - j->a * 1.1f - 8) * SS, x1 = (int)(j->cx + j->a * 1.1f + 8) * SS + SS - 1;
+    int y0 = (int)(j->cy - j->b - 8) * SS, y1 = (int)(j->cy + j->b + 5) * SS + SS - 1;
     x0 = x0 < 0 ? 0 : x0;
     y0 = y0 < 0 ? 0 : y0;
-    x1 = x1 >= W ? W - 1 : x1;
-    y1 = y1 >= H ? H - 1 : y1;
-    int ox = iround(j->cx), oy = iround(j->cy);
+    x1 = x1 >= R ? R - 1 : x1;
+    y1 = y1 >= R ? R - 1 : y1;
+    int ox = iround(j->cx * SS), oy = iround(j->cy * SS);
     int32_t cx = QF(j->cx), fcx = QF(j->fx), inv_fa = QF(1.0f / j->fa);
 
     for (int y = y0; y <= y1; y++) {
         row_t row;
-        row_setup(j, y + 0.5f, &row);
-        int32_t fy = y * ONE + ONE / 2;
+        row_setup(j, (y + 0.5f) / SS, &row);
+        int32_t fy = (y * ONE + ONE / 2) / SS;
         for (int x = x0; x <= x1; x++) {
-            int32_t fx = x * ONE + ONE / 2;
+            int32_t fx = (x * ONE + ONE / 2) / SS;
             int32_t lx, ly;
 
             /* Arms sit in front of the body. */
             bool arm = false;
             for (int a = 0; a < 2 && !arm; a++) {
                 if (in_limb(&arm_q[a], fx, fy, &lx, &ly)) {
-                    s_mask[y * W + x] = M_ARM;
+                    s_mask[y * R + x] = M_ARM;
                     int32_t nx = ((lx * QF(0.85f)) >> Q) + (a ? QF(0.25f) : -QF(0.25f));
-                    px(x, y, fur(nx, (ly * QF(0.8f)) >> Q, x, y, ox, oy));
+                    fpx(x, y, fur(nx, (ly * QF(0.8f)) >> Q, x, y, ox, oy));
                     arm = true;
                 }
             }
@@ -571,7 +603,7 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
                 int32_t ff = ((fu2 * fu2) >> Q) + row.fv4;
                 int32_t b = bayer_q(x, y);
                 if (ff <= ONE) {
-                    s_mask[y * W + x] = M_FACE;
+                    s_mask[y * R + x] = M_FACE;
                     int32_t fv = row.fv, fv1 = fv + QF(0.15f);
                     uint8_t c = C_SKIN;
                     if (fv < -QF(0.55f) && b < ((-fv - QF(0.45f)) * QF(1.8f)) >> Q) {
@@ -581,14 +613,14 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
                     } else if (fv > QF(0.75f) && b < QF(0.4f)) {
                         c = C_SKIND;
                     }
-                    px(x, y, c);
+                    fpx(x, y, c);
                 } else {
-                    s_mask[y * W + x] = M_BODY;
+                    s_mask[y * R + x] = M_BODY;
                     /* Fur darkens where it tucks around the face. */
                     if (ff < QF(1.75f) && (ff < QF(1.3f) || b < ((QF(1.75f) - ff) * QF(1.4f)) >> Q)) {
-                        px(x, y, ff < QF(1.3f) ? C_OUT2 : C_BD);
+                        fpx(x, y, ff < QF(1.3f) ? C_OUT2 : C_BD);
                     } else {
-                        px(x, y, fur((ux * QF(0.95f)) >> Q, (uy * QF(0.95f)) >> Q, x, y, ox, oy));
+                        fpx(x, y, fur((ux * QF(0.95f)) >> Q, (uy * QF(0.95f)) >> Q, x, y, ox, oy));
                     }
                 }
                 continue;
@@ -596,8 +628,8 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
 
             for (int f = 0; f < 2; f++) {
                 if (in_limb(&foot_q[f], fx, fy, &lx, &ly)) {
-                    s_mask[y * W + x] = M_FOOT;
-                    px(x, y, ly < -QF(0.2f) ? C_BM : C_BD);
+                    s_mask[y * R + x] = M_FOOT;
+                    fpx(x, y, ly < -QF(0.2f) ? C_BM : C_BD);
                     break;
                 }
             }
@@ -606,17 +638,17 @@ static void draw_avatar(const avatar_t *j, const limb_t arms[2], const limb_t fe
 
     /* Hard outline on the silhouette, and seams where parts overlap. */
     static const int8_t N4[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
-    for (int y = 0; y < H; y++) {
-        for (int x = 0; x < W; x++) {
-            uint8_t m = s_mask[y * W + x];
+    for (int y = 0; y < R; y++) {
+        for (int x = 0; x < R; x++) {
+            uint8_t m = s_mask[y * R + x];
             if (m == M_NONE || m == M_FACE) {
                 continue;
             }
             for (int k = 0; k < 4; k++) {
                 int xx = x + N4[k][0], yy = y + N4[k][1];
-                uint8_t n = ((unsigned)xx < W && (unsigned)yy < H) ? s_mask[yy * W + xx] : M_NONE;
+                uint8_t n = ((unsigned)xx < R && (unsigned)yy < R) ? s_mask[yy * R + xx] : M_NONE;
                 if (n == M_NONE || (m == M_ARM && (n == M_BODY || n == M_FACE)) || (m == M_BODY && n == M_FOOT)) {
-                    px(x, y, C_OUT);
+                    fpx(x, y, C_OUT);
                     break;
                 }
             }
@@ -832,20 +864,34 @@ static void draw_alert(int x, int y)
  * ------------------------------------------------------------------------- */
 
 /*
- * Screen pixel -> grid cell, with 0x80 set on a cell's last screen pixel. When
- * cells are 3+ pixels, that edge is drawn dimmer so the pixel grid shows.
+ * Screen pixel -> framebuffer pixel, with 0x80 set on a cell's last screen
+ * pixel. When cells are 3+ pixels, that edge is drawn dimmer so the pixel grid
+ * shows (unless the build sets MUSE_PIXEL_GRID=0, or draws finer than the grid).
  */
+#ifndef MUSE_PIXEL_GRID
+#define MUSE_PIXEL_GRID 1
+#endif
 #define MAP_MAX 512
 static uint8_t s_map[MAP_MAX];
 static int s_size;
 
+#if SS > 1
+/* For muse_ui's redraws: the fine framebuffer, SS x SS pixels to a grid cell. */
+const uint8_t *muse_pixel_fine(int *ss);
+const uint8_t *muse_pixel_fine(int *ss)
+{
+    *ss = SS;
+    return s_fb;
+}
+#endif
+
 void muse_pixel_set_size(int px)
 {
     s_size = px < MAP_MAX ? px : MAP_MAX;
-    bool grid = s_size >= 3 * W;
+    bool grid = MUSE_PIXEL_GRID && SS == 1 && s_size >= 3 * W;
     for (int i = 0; i < s_size; i++) {
-        int cell = i * W / s_size;
-        bool edge = grid && (i + 1) * W / s_size != cell;
+        int cell = i * R / s_size;
+        bool edge = grid && (i + 1) * R / s_size != cell;
         s_map[i] = (uint8_t)(cell | (edge ? 0x80 : 0));
     }
 }
@@ -853,8 +899,8 @@ void muse_pixel_set_size(int px)
 void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int y1)
 {
     int n = x1 - x0 + 1;
-    const uint8_t *xmap = &s_map[x0];
     const uint16_t *prev = NULL;
+    const uint8_t *xmap = &s_map[x0];
     uint8_t prev_m = 0;
     for (int y = y0; y <= y1; y++, dst += stride_px) {
         uint8_t m = s_map[y];
@@ -862,7 +908,7 @@ void muse_pixel_scale(uint16_t *dst, int stride_px, int x0, int x1, int y0, int 
             memcpy(dst, prev, n * sizeof(uint16_t));
             continue;
         }
-        const uint8_t *row = &s_fb[(m & 0x7f) * W];
+        const uint8_t *row = &s_fb[(m & 0x7f) * R];
         if (m & 0x80) {
             for (int i = 0; i < n; i++) {
                 dst[i] = s_pal_dim[row[xmap[i] & 0x7f]];

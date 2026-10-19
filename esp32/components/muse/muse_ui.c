@@ -219,7 +219,7 @@ static const char *const MODE_NAMES[MUSE_MODE_COUNT] = {
 static lv_image_dsc_t s_muse_src;
 static lv_draw_buf_t *s_strips[STRIPS];
 static bool s_strip_busy[STRIPS];
-static uint16_t *s_cells;       /* each cell's colour as last invalidated */
+static uint32_t *s_cells;       /* each cell's colour (or its fine pixels) as last invalidated */
 static uint16_t *s_cell_row;    /* one screen row of Muse */
 static bool s_cells_valid;
 
@@ -302,12 +302,13 @@ static void muse_image_init(void)
     lv_image_decoder_set_close_cb(dec, muse_dec_close);
     dec->name = "muse";
 
-    s_cells = heap_caps_malloc(MUSE_PX_W * MUSE_PX_H * sizeof(uint16_t), MUSE_BIG_CAPS);
+    s_cells = heap_caps_malloc(MUSE_PX_W * MUSE_PX_H * sizeof(uint32_t), MUSE_BIG_CAPS);
     s_cell_row = heap_caps_malloc(MUSE_PIXEL_MAX_PX * sizeof(uint16_t), MUSE_BIG_CAPS);
     if (!s_cells || !s_cell_row) {
         free(s_cells);
         free(s_cell_row);
-        s_cells = s_cell_row = NULL;   /* redraw all of Muse every frame */
+        s_cells = NULL;   /* redraw all of Muse every frame */
+        s_cell_row = NULL;
     }
 }
 
@@ -329,6 +330,30 @@ static int32_t rect_cells(const lv_area_t *r)
     return lv_area_get_width(r) * lv_area_get_height(r);
 }
 
+/*
+ * The default avatar's framebuffer when it draws finer than its grid
+ * (avatar/muse_pixel.c, CONFIG_MUSE_AVATAR_SMOOTH), with *ss fine pixels to a
+ * cell each way; else NULL. Other avatars don't define it.
+ */
+__attribute__((weak)) const uint8_t *muse_pixel_fine(int *ss)
+{
+    (void)ss;
+    return NULL;
+}
+
+/* A cell's fine pixels, packed: exact for 2 x 2 of them, folded beyond. */
+static uint32_t fine_cell(const uint8_t *fine, int ss, int cx, int cy)
+{
+    uint32_t c = 0;
+    for (int j = 0; j < ss; j++) {
+        const uint8_t *row = &fine[(cy * ss + j) * MUSE_PX_W * ss + cx * ss];
+        for (int i = 0; i < ss; i++) {
+            c = (c << 8 | c >> 24) ^ row[i];
+        }
+    }
+    return c;
+}
+
 static void invalidate_muse(void)
 {
     if (!s_cells) {
@@ -336,15 +361,19 @@ static void invalidate_muse(void)
         return;
     }
     int size = (int)s_muse_src.header.w;
+    int ss = 1;
+    const uint8_t *fine = muse_pixel_fine(&ss);   /* drawn finer, one pixel per cell isn't enough */
     lv_area_t r[MUSE_PX_H];   /* in cells */
     int n = 0;
     for (int cy = 0; cy < MUSE_PX_H; cy++) {
-        int32_t y = cell_px(cy, size);
-        muse_pixel_scale(s_cell_row, size, 0, size - 1, y, y);
-        uint16_t *last = &s_cells[cy * MUSE_PX_W];
+        if (!fine) {
+            int32_t y = cell_px(cy, size);
+            muse_pixel_scale(s_cell_row, size, 0, size - 1, y, y);
+        }
+        uint32_t *last = &s_cells[cy * MUSE_PX_W];
         int x1 = -1, x2 = -1;
         for (int cx = 0; cx < MUSE_PX_W; cx++) {
-            uint16_t c = s_cell_row[cell_px(cx, size)];
+            uint32_t c = fine ? fine_cell(fine, ss, cx, cy) : s_cell_row[cell_px(cx, size)];
             if (c != last[cx] || !s_cells_valid) {
                 last[cx] = c;
                 x1 = x1 < 0 ? cx : x1;
