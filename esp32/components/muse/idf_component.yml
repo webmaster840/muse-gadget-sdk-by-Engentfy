@@ -26,6 +26,13 @@ dependencies:
     public: true
     rules:
       - if: "$CONFIG{MUSE_BOARD_ID} != \"none\""
+  # A custom avatar that plays pre-rendered JPEG frames from the avatar
+  # partition (partitions_muse_32mb.csv). The LVGL adapter already brings it to
+  # these boards.
+  espressif/esp_new_jpeg:
+    version: "1.*"
+    rules:
+      - if: "$CONFIG{MUSE_BOARD_ID} in [\"waveshare_s3_175c\", \"waveshare_s3_175\"]"
   espressif/esp_lvgl_adapter:
     version: "0.6.4"
     rules:

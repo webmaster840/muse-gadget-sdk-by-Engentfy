@@ -354,8 +354,25 @@ static uint32_t fine_cell(const uint8_t *fine, int ss, int cx, int cy)
     return c;
 }
 
+/*
+ * An avatar that plays pre-rendered frames rather than drawing cells says what
+ * to redraw itself: 1 all of it, 0 nothing. -1 (avatars that don't define it):
+ * find the changed cells below.
+ */
+__attribute__((weak)) int muse_pixel_redraw(void)
+{
+    return -1;
+}
+
 static void invalidate_muse(void)
 {
+    int redraw = muse_pixel_redraw();
+    if (redraw >= 0) {
+        if (redraw) {
+            lv_obj_invalidate(s_canvas);
+        }
+        return;
+    }
     if (!s_cells) {
         lv_obj_invalidate(s_canvas);
         return;

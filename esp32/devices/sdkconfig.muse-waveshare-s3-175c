@@ -65,3 +65,5 @@ CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION=y
 # actually slept, and how long each power lock kept the chip awake.
 CONFIG_PM_LIGHT_SLEEP_CALLBACKS=y
 CONFIG_PM_PROFILING=y
+# 32 MB of flash: the full-UI table plus a partition for avatar clips.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_muse_32mb.csv"
