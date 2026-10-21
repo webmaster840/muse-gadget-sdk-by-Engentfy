@@ -183,6 +183,25 @@ bool muse_hatch_caption_at(const char *text, size_t at, char *out, size_t cap)
     return true;
 }
 
+bool muse_hatch_caption_page(const char *text, int page, char *out, size_t cap)
+{
+    int cols, lines;
+    muse_state_page(muse_text_has_cjk(text), &cols, &lines);
+    const char *p = text, *start;
+    size_t len, o = 0;
+    out[0] = '\0';
+    for (int n = 0; page >= 0 && n < (page + 1) * lines && next_line(&p, cols, &start, &len); n++) {
+        if (n < page * lines) {
+            continue;
+        }
+        if (o + 1 + len >= cap) {
+            break;   /* whole lines only */
+        }
+        o += snprintf(out + o, cap - o, "%s%.*s", o ? "\n" : "", (int)len, start);
+    }
+    return o > 0;
+}
+
 /* ---- Typed turns on the serial console ---- */
 
 /* JSON-escapes whole characters of *src into out, up to cap - 1 bytes; moves *src past them. */

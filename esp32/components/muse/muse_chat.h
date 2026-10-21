@@ -119,6 +119,11 @@ size_t muse_hatch_turn_read(int16_t *pcm, size_t frames, int wait_ms);
 bool muse_hatch_take_incoming(void);
 void muse_hatch_on_incoming(void);
 
+/* Page `page` (from 0) of `text` wrapped to the screen's page (muse_state_page),
+ * without the overlap a spoken reply's pages have: for a note whose pages turn
+ * on a timer. False past the last page. */
+bool muse_hatch_caption_page(const char *text, int page, char *out, size_t cap);
+
 /* Bench test: decodes a built-in MP3 to 16 kHz; caller frees *pcm. Returns frames. */
 size_t muse_hatch_mp3_selftest(int16_t **pcm);
 

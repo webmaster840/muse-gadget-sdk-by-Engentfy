@@ -347,8 +347,8 @@ static void go_idle(const char *caption);
  */
 static bool hatch_reply(bool *delivered, bool incoming)
 {
+    muse_state_set_mode(MUSE_MODE_THINKING);   /* before any reply caption: a note steps aside (muse_ui) */
     if (!incoming) {
-        muse_state_set_mode(MUSE_MODE_THINKING);
         muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
     }
     static int16_t buf[MUSE_AUDIO_CHUNK];

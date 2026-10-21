@@ -51,6 +51,13 @@ void muse_ui_preview_brightness(int pct);
 bool muse_ui_image_size(int *w, int *h);
 bool muse_ui_image_draw(int x, int y, int w, int h, const uint16_t *pixels);
 void muse_ui_image_hide(void);
+
+/* display.show_text, from any task: wakes the screen; once the face is idle the
+ * note shows in the reply's reading layout, paging itself, until a tap, a press
+ * to talk or the next note (Muse speaking only pauses it). An empty one clears
+ * it. Longer than MUSE_NOTE_MAX - 1 bytes is cut short. */
+#define MUSE_NOTE_MAX 1001
+void muse_ui_show_note(const char *text);
 /* Watcher camera mode: shows an on-screen shutter hint over the live image. */
 void muse_ui_camera_hint(bool visible);
 

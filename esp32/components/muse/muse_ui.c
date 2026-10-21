@@ -186,6 +186,25 @@ enum { ANSWER_HEARD, ANSWER_READ };
 static answer_layout_t s_answers[2];
 static int s_answer = -1;       /* the layout showing, or -1 */
 static int s_page_for = -1;     /* the layout the reply's page is sized for */
+
+/*
+ * display.show_text: a note Muse left, shown once the face is idle in the
+ * layout for reading a reply, its pages turning every NOTE_PAGE_S. Muse
+ * thinking or speaking (the reply that came with it, say) only pauses it; it
+ * goes on a tap, a press to talk, another caption while idle, or another note
+ * (an empty one only clears it).
+ */
+#define NOTE_PAGE_S 5.0f
+#define NOTE_SETTLE_S 0.5f   /* idle this long: a turn's last caption has landed */
+static portMUX_TYPE s_note_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_note_in[MUSE_NOTE_MAX];      /* from muse_ui_show_note, under s_note_lock */
+static volatile bool s_note_new;
+static char s_note[MUSE_NOTE_MAX];         /* the LVGL task's */
+static bool s_note_on;
+static bool s_note_paused;                 /* Muse thinking or speaking over it */
+static int s_note_page;
+static float s_note_turned;
+static uint32_t s_note_version;            /* the caption the note last set */
 static int s_big_y;             /* Muse's centre at full size */
 static int s_muse_y;            /* and now */
 static int s_from_px, s_from_y, s_to_px, s_to_y;
@@ -537,10 +556,27 @@ static void build_button_icons(lv_obj_t *face)
     lv_obj_align(s_aux_icon, a->align, a->x, a->y);
 }
 
+static bool note_showing(void);
+
+static void note_close(void)
+{
+    if (note_showing()) {
+        muse_state_set_caption("%s", "");
+    }
+    s_note_on = false;
+}
+
 static void on_canvas_clicked(lv_event_t *e)
 {
     (void)e;
+    note_close();
     muse_state_make_happy();
+}
+
+static void on_reply_clicked(lv_event_t *e)
+{
+    (void)e;
+    note_close();
 }
 
 static const lv_font_t *font_pick(const lv_font_t *full, const lv_font_t *compact)
@@ -839,7 +875,8 @@ static void build_answer(lv_obj_t *face, int ring_in)
     /* Pages come wrapped to fit; the transcript while thinking doesn't. */
     lv_label_set_long_mode(s_reply_lbl, LV_LABEL_LONG_MODE_WRAP);
     lv_obj_remove_flag(s_reply_lbl, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_reply_lbl, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);   /* a tap closes a note */
+    lv_obj_add_event_cb(s_reply_lbl, on_reply_clicked, LV_EVENT_CLICKED, NULL);
 
     if (muse_board->touch && !muse_board->rim_controls) {
         build_speaker(face, spk_x, spk_y);
@@ -1498,6 +1535,71 @@ static void update_power(float now)
     }
 }
 
+/* Captions the note's page s_note_page, sized for reading; past the last, the first again. */
+static void show_note_page(void)
+{
+    if (s_reply_lbl && s_page_for != ANSWER_READ) {
+        muse_state_set_page(s_answers[ANSWER_READ].cols, s_answers[ANSWER_READ].lines);
+        s_page_for = ANSWER_READ;
+    }
+    static char page[MUSE_CAPTION_MAX];
+    if (!muse_hatch_caption_page(s_note, s_note_page, page, sizeof(page))) {
+        s_note_page = 0;
+        muse_hatch_caption_page(s_note, 0, page, sizeof(page));
+    }
+    muse_state_set_caption("%s", page);
+    muse_state_caption(page, sizeof(page), &s_note_version);   /* its own caption isn't another's */
+}
+
+static bool note_showing(void)
+{
+    return s_note_on && !s_note_paused;
+}
+
+/* Each frame the face shows: takes a note once idle, steps it aside while Muse
+ * thinks or speaks, turns its pages, and lets it go as above. */
+static void update_note(muse_mode_t mode, float mode_t, float now)
+{
+    static char seen[MUSE_CAPTION_MAX];
+    bool idle = mode == MUSE_MODE_IDLE && mode_t >= NOTE_SETTLE_S;
+    if (mode == MUSE_MODE_LISTENING) {
+        s_note_on = false;   /* you're talking: a new conversation */
+    }
+    if (s_note_new && idle) {
+        portENTER_CRITICAL(&s_note_lock);
+        strlcpy(s_note, s_note_in, sizeof(s_note));
+        s_note_new = false;
+        portEXIT_CRITICAL(&s_note_lock);
+        note_close();
+        if (s_note[0]) {
+            s_note_on = true;
+            s_note_paused = false;
+            s_note_page = 0;
+            s_note_turned = now;
+            show_note_page();
+        }
+        return;
+    }
+    if (!s_note_on) {
+        return;
+    }
+    if (mode != MUSE_MODE_IDLE) {
+        s_note_paused = true;   /* the reply's captions have the screen */
+    } else if (s_note_paused) {
+        if (idle) {
+            s_note_paused = false;   /* back where it was, after the turn's last caption */
+            s_note_turned = now;
+            show_note_page();
+        }
+    } else if (muse_state_caption(seen, sizeof(seen), &s_note_version)) {
+        s_note_on = false;   /* captioned over */
+    } else if (now - s_note_turned >= NOTE_PAGE_S) {
+        s_note_turned = now;
+        s_note_page++;
+        show_note_page();
+    }
+}
+
 static void update_status(muse_mode_t mode, float now)
 {
     uint32_t accent = muse_pixel_accent(mode);
@@ -1573,13 +1675,14 @@ static void update_status(muse_mode_t mode, float now)
     bool fresh = muse_state_caption(caption, sizeof(caption), &s_caption_version);
     int answer = -1;
     if (s_reply_lbl) {
-        /* The speaker picks the layout, even mid-reply: the voice task pages to fit. */
-        int layout = muse_settings_speaker_on() ? ANSWER_HEARD : ANSWER_READ;
+        /* The speaker picks the layout, even mid-reply: the voice task pages to fit.
+         * A note is there to be read. */
+        int layout = muse_settings_speaker_on() && !note_showing() ? ANSWER_HEARD : ANSWER_READ;
         if (layout != s_page_for) {
             muse_state_set_page(s_answers[layout].cols, s_answers[layout].lines);
             s_page_for = layout;
         }
-        if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING) {
+        if (mode == MUSE_MODE_THINKING || mode == MUSE_MODE_SPEAKING || note_showing()) {
             answer = layout;
         }
     }
@@ -1709,6 +1812,7 @@ static void frame_tick(lv_timer_t *timer)
     muse_pixel_render(&pose);
     invalidate_muse();
 
+    update_note(mode, mode_t, now);
     update_status(mode, now);
 }
 
@@ -1850,6 +1954,15 @@ void muse_ui_image_hide(void)
     if (s_camera_hint) lv_obj_add_flag(s_camera_hint, LV_OBJ_FLAG_HIDDEN);
 #endif
     muse_board->display_unlock();
+}
+
+void muse_ui_show_note(const char *text)
+{
+    portENTER_CRITICAL(&s_note_lock);
+    strlcpy(s_note_in, text, sizeof(s_note_in));
+    s_note_new = true;
+    portEXIT_CRITICAL(&s_note_lock);
+    muse_state_set_asleep(false);   /* as display.draw_url does: Muse wants it read */
 }
 
 #if CONFIG_MUSE_WATCHER_CAMERA

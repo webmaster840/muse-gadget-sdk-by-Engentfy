@@ -1457,6 +1457,18 @@ static char *build_register_json(void) {
 #endif
 
 #if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+    cJSON *text_required = cJSON_CreateObject();
+    cJSON_AddItemToObject(text_required, "text",
+                          string_param("Up to 1000 bytes of UTF-8; empty clears the note."));
+    add_command(commands, "display.show_text",
+                "Leave a short note on the gadget's screen to be read: a list, "
+                "a number, a reminder. Nothing is uploaded, unlike "
+                "display.draw_url. It shows once the gadget is idle, turning "
+                "pages by itself if it's longer than a screenful, and stays "
+                "until a tap, the user talking, or another note; while you "
+                "speak a reply it steps aside and then comes back.",
+                text_required, nullptr);
+
     // The names are muse_state.c's REACTION_NAMES.
     cJSON *react_required = cJSON_CreateObject();
     cJSON_AddItemToObject(react_required, "reaction",
