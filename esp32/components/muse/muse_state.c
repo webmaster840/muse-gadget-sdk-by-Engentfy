@@ -246,3 +246,90 @@ float muse_state_happiness(void)
     /* Ease out over the last 0.4 s. */
     return left > 0.4f ? 1.0f : left / 0.4f;
 }
+
+/* ---- Reactions (host-tested: tests/test_muse_reactions.py) ---- */
+
+#define REACTION_SHOW_US 1600000LL        /* as long as a pet: avatars play the reaction out */
+#define REACTION_GOODNIGHT_US 5500000LL   /* the goodbye and a moment asleep, then the screen sleeps */
+#define REACTION_WAIT_US 120000000LL      /* asked this long ago and never shown: stale */
+
+static const char *const REACTION_NAMES[MUSE_REACTION_COUNT] = {
+    [MUSE_REACTION_HAPPY] = "happy",
+    [MUSE_REACTION_THINKING] = "thinking",
+    [MUSE_REACTION_SHRUG] = "shrug",
+    [MUSE_REACTION_GOODNIGHT] = "goodnight",
+};
+
+typedef struct {
+    muse_reaction_t asked, showing;
+    int64_t asked_us, shown_us;
+} reaction_t;
+
+muse_reaction_t muse_reaction_from_name(const char *name)
+{
+    for (int r = MUSE_REACTION_NONE + 1; name && r < MUSE_REACTION_COUNT; r++) {
+        if (!strcmp(name, REACTION_NAMES[r])) {
+            return (muse_reaction_t)r;
+        }
+    }
+    return MUSE_REACTION_NONE;
+}
+
+/* One frame at now_us: the reaction showing. A new turn drops what's asked,
+ * and leaving idle what's showing; *sleep is set as goodnight ends. */
+static muse_reaction_t reaction_step(reaction_t *r, int64_t now_us, muse_mode_t mode, bool *sleep)
+{
+    *sleep = false;
+    if (mode == MUSE_MODE_LISTENING || (r->asked && now_us - r->asked_us > REACTION_WAIT_US)) {
+        r->asked = MUSE_REACTION_NONE;
+    }
+    if (mode != MUSE_MODE_IDLE) {
+        r->showing = MUSE_REACTION_NONE;
+        return MUSE_REACTION_NONE;
+    }
+    if (r->asked) {
+        r->showing = r->asked;
+        r->shown_us = now_us;
+        r->asked = MUSE_REACTION_NONE;
+    }
+    int64_t lasts = r->showing == MUSE_REACTION_GOODNIGHT ? REACTION_GOODNIGHT_US : REACTION_SHOW_US;
+    if (r->showing && now_us - r->shown_us >= lasts) {
+        muse_reaction_t ended = r->showing;
+        r->showing = MUSE_REACTION_NONE;
+        if (ended == MUSE_REACTION_GOODNIGHT) {
+            *sleep = true;
+            return ended;   /* this last frame too: asleep, not idle, as the screen goes dark */
+        }
+    }
+    return r->showing;
+}
+
+/* ---- end of reactions ---- */
+
+static reaction_t s_reaction;   /* under s_lock */
+
+void muse_state_react(muse_reaction_t reaction)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_reaction.asked = reaction;
+    s_reaction.asked_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_lock);
+    muse_state_set_asleep(false);   /* as display.draw_url does: Muse wants it seen */
+}
+
+muse_reaction_t muse_state_update_reaction(void)
+{
+    int64_t now = esp_timer_get_time();
+    bool sleep;
+    portENTER_CRITICAL(&s_lock);
+    muse_reaction_t was = s_reaction.showing;
+    muse_reaction_t r = reaction_step(&s_reaction, now, s_mode, &sleep);
+    portEXIT_CRITICAL(&s_lock);
+    if (r == MUSE_REACTION_HAPPY && was != r) {
+        muse_state_make_happy();   /* avatars that don't draw reactions hop as when petted */
+    }
+    if (sleep) {
+        muse_state_set_asleep(true);
+    }
+    return r;
+}

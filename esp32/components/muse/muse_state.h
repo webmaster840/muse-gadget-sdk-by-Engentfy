@@ -95,3 +95,24 @@ void muse_state_nudge(void);
 /* Touch/pet reaction. */
 void muse_state_make_happy(void);
 float muse_state_happiness(void);
+
+/*
+ * A reaction Muse asked for (avatar.react). Asking wakes the screen; the
+ * reaction waits for the face to be idle (Muse may still be speaking its
+ * reply), shows for a moment, and is dropped if a new turn starts first or it
+ * waited two minutes. Goodnight then sleeps the screen.
+ */
+typedef enum {
+    MUSE_REACTION_NONE = 0,
+    MUSE_REACTION_HAPPY,
+    MUSE_REACTION_THINKING,
+    MUSE_REACTION_SHRUG,
+    MUSE_REACTION_GOODNIGHT,
+    MUSE_REACTION_COUNT,
+} muse_reaction_t;
+
+/* By name: "happy", "thinking", "shrug" or "goodnight"; MUSE_REACTION_NONE otherwise. */
+muse_reaction_t muse_reaction_from_name(const char *name);
+void muse_state_react(muse_reaction_t reaction);
+/* Once per frame drawn: the reaction showing, mostly MUSE_REACTION_NONE. */
+muse_reaction_t muse_state_update_reaction(void);
