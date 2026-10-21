@@ -26,6 +26,7 @@ class ChatSession(unittest.TestCase):
         handlers = source[source.index('static int find_msg('):source.index('static void on_chat_ack(')]
         reset = source[source.index('static bool turn_start('):source.index('static void turn_begin(')]
         code = r'''
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -58,6 +59,10 @@ static void turn_fail(const char *) { turn_finish(); }
 static bool ensure_connected() { return true; }
 bool muse_hatch_configured() { return true; }
 static void resampler_init(resampler_t *, int, int) {}
+static std::atomic<uint32_t> s_gen{0};
+static std::atomic<bool> s_incoming{false};
+static int woke;
+extern "C" void muse_hatch_on_incoming(void) { woke++; }
 ''' + reset + handlers + r'''
 static void begin(bool typed = false) {
     assert(turn_start(s_turn.gen + 1, typed));
@@ -128,12 +133,36 @@ static void bounded_rejections() {
     event("message.assistant", "second", "note", "Second");
     assert(s_turn.nmsgs == 2 && s_turn.msgs[0].done && s_turn.msgs[1].done);
 }
+static void incoming() {
+    /* Between turns, only an assistant message starts a turn of its own. */
+    s_turn = turn_t{};
+    s_gen = 7;
+    event("agent.status", "x");
+    event("chat.seen", "x");
+    event("delta.text_append", "late", "", "tail of nothing");
+    assert(s_turn.phase == P_IDLE && !woke && !s_incoming);
+    event("delta.message_start", "hello");
+    assert(s_turn.phase == P_WAIT_REPLY && s_turn.gen == 7 && woke == 1);
+    assert(s_incoming.exchange(false));
+    event("delta.text_append", "hello", "", "Hola!");
+    event("delta.message_done", "hello");
+    assert(s_turn.nmsgs == 1 && s_turn.msgs[0].done && s_turn.msgs[0].len == 5 && captions == 1);
+    event("message.assistant", "more", "", "Y otra cosa");   /* a second message joins it */
+    assert(s_turn.nmsgs == 2 && woke == 1);
+    /* After that turn ends, the next message starts another. */
+    s_turn.phase = P_IDLE;   /* as turn_done leaves it */
+    event("message.assistant", "again", "", "Otra vez");
+    assert(s_turn.phase == P_WAIT_REPLY && s_incoming && woke == 2);
+    /* A press or typed turn starting over clears the flag: voice_task won't play it. */
+    assert(turn_start(8, false) && !s_incoming);
+}
 int main(int argc, char **argv) {
     assert(argc == 2);
     switch (atoi(argv[1])) {
     case 0: rejected_deltas(); break;
     case 1: valid_parents(); break;
     case 2: bounded_rejections(); break;
+    case 3: incoming(); break;
     default: return 2;
     }
 }
@@ -166,3 +195,6 @@ int main(int argc, char **argv) {
 
     def test_rejection_capacity_preserves_correlation(self):
         self.run_case(2)
+
+    def test_messages_muse_writes_between_turns_start_a_turn_of_their_own(self):
+        self.run_case(3)
