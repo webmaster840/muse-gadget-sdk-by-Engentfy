@@ -80,6 +80,28 @@ class CaptionWrapTest(unittest.TestCase):
         )
         return proc.stdout.decode().split("\n")
 
+    def pages(self, text: str, cols: int, lines: int) -> list[str]:
+        """A note's pages, as display.show_text turns them (muse_hatch_caption_page)."""
+        pages: list[str] = []
+        while len(pages) < 50:
+            proc = subprocess.run(
+                [str(self.binary), "page", str(cols), str(lines), str(len(pages))],
+                input=text.encode(),
+                capture_output=True,
+            )
+            if proc.returncode:
+                break
+            pages.append(proc.stdout.decode().replace("\r\n", "\n"))   # Windows writes text mode
+        return pages
+
+    def test_a_note_pages_without_overlap_or_gaps(self) -> None:
+        self.assertEqual(
+            self.pages("uno dos tres cuatro cinco seis siete", 10, 2),
+            ["uno dos\ntres", "cuatro\ncinco seis", "siete"],
+        )
+        self.assertEqual(self.pages("corto", 10, 2), ["corto"])
+        self.assertEqual(self.pages("", 10, 2), [])
+
     def test_words_stay_whole(self) -> None:
         self.assertEqual(self.wrap("the quick brown fox jumps", 10), ["the quick", "brown fox", "jumps"])
 

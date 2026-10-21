@@ -21,7 +21,9 @@
  *   caption C  stdin is a reply's text: prints it wrapped to C columns, as the
  *              screen pages it (test_muse_caption_wrap.py)
  *   ascii      stdin is a reply's text: prints it with the ASCII stand-ins the
- *              caption shows (muse_text.c, test_muse_caption_wrap.py) */
+ *              caption shows (muse_text.c, test_muse_caption_wrap.py)
+ *   page C L N stdin is a note: prints its page N of L lines of C columns;
+ *              exits 1 past the last (test_muse_caption_wrap.py) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,13 +98,21 @@ int main(int argc, char **argv)
         if (muse_hatch_caption_at(in, 0, page, sizeof(page))) {
             fputs(page, stdout);
         }
+    } else if (argc > 4 && !strcmp(argv[1], "page")) {
+        s_cols = atoi(argv[2]);
+        s_lines = atoi(argv[3]);
+        static char page[1 << 16];
+        if (!muse_hatch_caption_page(in, atoi(argv[4]), page, sizeof(page))) {
+            return 1;   /* past the last page */
+        }
+        fputs(page, stdout);
     } else if (argc > 1 && !strcmp(argv[1], "ascii")) {
         static char shown[1 << 16];
         strlcpy(shown, in, sizeof(shown));
         muse_text_to_ascii(shown, sizeof(shown));
         fputs(shown, stdout);
     } else {
-        fprintf(stderr, "usage: %s console|unescape|caption COLS|ascii < input\n", argv[0]);
+        fprintf(stderr, "usage: %s console|unescape|caption COLS|page COLS LINES N|ascii < input\n", argv[0]);
         return 2;
     }
     free(in);

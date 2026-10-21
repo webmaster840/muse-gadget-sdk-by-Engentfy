@@ -83,6 +83,7 @@
 #include "muse_glue.h"
 #include "muse_input.h"
 #include "muse_state.h"   // avatar.react
+#include "muse_ui.h"      // display.show_text
 // Muse joins Wi-Fi from its own settings, before or without pairing.
 #define WIFI_WITHOUT_PAIRING 1
 #else
@@ -1906,6 +1907,19 @@ static cJSON *on_ws_command(
     }
 #endif
 #if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+    if (strcmp(command, "display.show_text") == 0) {
+        cJSON *text = cJSON_GetObjectItem(params, "text");
+        if (!cJSON_IsString(text) || !text->valuestring) {
+            return command_error("missing_param", "text is required");
+        }
+        if (strlen(text->valuestring) >= MUSE_NOTE_MAX) {
+            return command_error("invalid_params", "text is longer than 1000 bytes");
+        }
+        muse_ui_show_note(text->valuestring);
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        return result;
+    }
     if (strcmp(command, "avatar.react") == 0) {
         cJSON *name = cJSON_GetObjectItem(params, "reaction");
         muse_reaction_t reaction = muse_reaction_from_name(cJSON_IsString(name) ? name->valuestring : NULL);
