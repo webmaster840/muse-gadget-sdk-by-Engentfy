@@ -343,11 +343,14 @@ static void go_idle(const char *caption);
 /*
  * Plays Hatch's reply as it arrives, with its text as the caption. Returns
  * true if interrupted by a new press. *delivered: the VM has the note.
+ * incoming: a message Muse wrote between turns, with no note before it.
  */
-static bool hatch_reply(bool *delivered)
+static bool hatch_reply(bool *delivered, bool incoming)
 {
-    muse_state_set_mode(MUSE_MODE_THINKING);
-    muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
+    if (!incoming) {
+        muse_state_set_mode(MUSE_MODE_THINKING);
+        muse_state_set_caption("SENDING VOICE NOTE");   /* until there's a transcript or reply */
+    }
     static int16_t buf[MUSE_AUDIO_CHUNK];
     static const int16_t silence[MUSE_AUDIO_CHUNK];
     char text[96];
@@ -648,7 +651,7 @@ static bool send_held(bool quiet)
     if (fed == FED && quiet) {
         delivered = wait_delivered();
     } else if (fed == FED) {
-        interrupted = hatch_reply(&delivered);
+        interrupted = hatch_reply(&delivered, false);
     }
     if (fed != FED || quiet) {
         muse_hatch_turn_cancel();   /* asleep, the reply is left for the app */
@@ -735,7 +738,7 @@ static bool finish_note(void)
             }
         }
         if (fed) {
-            interrupted = hatch_reply(&delivered);
+            interrupted = hatch_reply(&delivered, false);
         }
         if (delivered || interrupted) {
             drop_rec();
@@ -747,8 +750,17 @@ static bool finish_note(void)
 #endif
     muse_hatch_turn_end();   /* before the chirp, which takes ~90 ms */
     muse_audio_chirp(0);
-    return hatch_reply(&delivered);
+    return hatch_reply(&delivered, false);
 }
+
+#if CONFIG_MUSE_HATCH
+/* From the session task as Muse writes between turns: wake to say it, which
+ * also ends voice_task's resting wait. */
+void muse_hatch_on_incoming(void)
+{
+    muse_state_set_asleep(false);
+}
+#endif
 
 /*
  * Whether a press can record: Hatch within reach, or (HOLD_NOTES) set up
@@ -843,6 +855,20 @@ static void voice_task(void *arg)
                 muse_audio_loopback_test(muse_settings_volume());
                 pre_reset();
             }
+#if CONFIG_MUSE_HATCH
+            if (muse_hatch_take_incoming()) {
+                /* Muse wrote between turns, in the app or on its own: say it. */
+                muse_wifi_power(MUSE_WIFI_FULL);
+                bool delivered;
+                pending_down = hatch_reply(&delivered, true);
+                pre_reset();
+                if (!pending_down && muse_state_mode(NULL) != MUSE_MODE_IDLE) {   /* failed: idle with why */
+                    muse_state_make_happy();
+                    go_idle("");
+                }
+                continue;
+            }
+#endif
             /* The 20 ms read paces this loop. */
             idle_capture();
             if (xQueueReceive(s_queue, &ev, 0) != pdTRUE) {

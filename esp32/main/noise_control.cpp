@@ -1456,6 +1456,22 @@ static char *build_register_json(void) {
     }
 #endif
 
+#if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+    // The names are muse_state.c's REACTION_NAMES.
+    cJSON *react_required = cJSON_CreateObject();
+    cJSON_AddItemToObject(react_required, "reaction",
+                          string_param("happy, thinking, shrug or goodnight."));
+    add_command(commands, "avatar.react",
+                "Make the character on the gadget's screen react for a "
+                "moment: happy (laughs with open arms), thinking (paw on "
+                "chin), shrug (doesn't know, or something went wrong) or "
+                "goodnight (waves, yawns and falls asleep, then the screen "
+                "turns off). It shows once the gadget is idle, after the "
+                "reply it may be speaking. Use it when it suits the "
+                "conversation.",
+                react_required, nullptr);
+#endif
+
 #if CONFIG_HOMEHUB_VOICE
     cJSON *volume_optional = cJSON_CreateObject();
     cJSON *volume_param = cJSON_CreateObject();

@@ -110,6 +110,15 @@ bool muse_hatch_turn_caption(size_t played, char *out, size_t cap);
 /* Reply speech as 16 kHz mono. Waits up to wait_ms for some; returns frames read. */
 size_t muse_hatch_turn_read(int16_t *pcm, size_t frames, int wait_ms);
 
+/*
+ * Muse wrote between turns (to its chat in the app, or on its own): true once
+ * per such reply, which then plays like a turn's (the three calls above).
+ * muse_hatch_on_incoming, if the board defines it, is called from the session
+ * task as one starts.
+ */
+bool muse_hatch_take_incoming(void);
+void muse_hatch_on_incoming(void);
+
 /* Bench test: decodes a built-in MP3 to 16 kHz; caller frees *pcm. Returns frames. */
 size_t muse_hatch_mp3_selftest(int16_t **pcm);
 

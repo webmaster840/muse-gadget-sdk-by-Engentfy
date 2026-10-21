@@ -82,6 +82,7 @@
 #if CONFIG_MUSE_ENABLED
 #include "muse_glue.h"
 #include "muse_input.h"
+#include "muse_state.h"   // avatar.react
 // Muse joins Wi-Fi from its own settings, before or without pairing.
 #define WIFI_WITHOUT_PAIRING 1
 #else
@@ -1899,6 +1900,19 @@ static cJSON *on_ws_command(
     }
     if (strcmp(command, "display.show_animation") == 0) {
         led_status_show_animation();
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddBoolToObject(result, "ok", true);
+        return result;
+    }
+#endif
+#if CONFIG_HOMEHUB_LED_BACKEND_MUSE
+    if (strcmp(command, "avatar.react") == 0) {
+        cJSON *name = cJSON_GetObjectItem(params, "reaction");
+        muse_reaction_t reaction = muse_reaction_from_name(cJSON_IsString(name) ? name->valuestring : NULL);
+        if (reaction == MUSE_REACTION_NONE) {
+            return command_error("invalid_params", "reaction must be happy, thinking, shrug or goodnight");
+        }
+        muse_state_react(reaction);
         cJSON *result = cJSON_CreateObject();
         cJSON_AddBoolToObject(result, "ok", true);
         return result;

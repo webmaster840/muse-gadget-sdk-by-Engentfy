@@ -31,6 +31,10 @@
  * A turn has no explicit end event; like Sidekick, it settles once every
  * message is done and nothing has arrived for a few seconds.
  *
+ * Muse's messages written between turns (to its chat in the app, or on its
+ * own) arrive on the same subscription, which stays open; each starts a turn
+ * of its own that plays the same way (incoming_begin).
+ *
  * Everything network-side runs on one task. The voice task talks to it through
  * a command queue, a stream buffer of mic audio, an event queue (captions) and
  * a stream buffer of reply audio. A generation number tags each turn so that
@@ -115,7 +119,6 @@ static_assert(MP3_BUF > MP3_POLL_ROOM + MP3_HOLD, "reads would stall with the MP
 
 #define PING_US (20 * 1000000LL)
 #define DEAD_US (60 * 1000000LL)           /* nothing from the server, pongs included */
-#define IDLE_CLOSE_US (10 * 60 * 1000000LL)
 #define AUTO_RETRY_MIN_US (5 * 1000000LL)  /* connecting without a turn, after a failure */
 #define AUTO_RETRY_MAX_US (120 * 1000000LL)
 #define FINAL_TIMEOUT_US (15 * 1000000LL)  /* release -> final transcript */
@@ -157,6 +160,10 @@ static QueueHandle_t s_cmds, s_events;
 static StreamBufferHandle_t s_in, s_out;
 static std::atomic<uint32_t> s_gen{0};
 static std::atomic<bool> s_resting{false};
+static std::atomic<bool> s_incoming{false};   /* a reply Muse started between turns, for muse_hatch_take_incoming */
+
+/* Weak: boards without the Muse UI (the Voice PE) have nothing to wake. */
+extern "C" __attribute__((weak)) void muse_hatch_on_incoming(void) {}
 
 /* ---- Connection ---- */
 
@@ -167,7 +174,7 @@ struct conn_t {
     uint8_t *ws, *rx, *tf, *sr, *svc, *env;   /* PSRAM scratch */
     int64_t next_id;
     int64_t sub_id;
-    int64_t last_rx_us, last_ping_us, last_use_us;
+    int64_t last_rx_us, last_ping_us;
 };
 
 static conn_t s_conn;
@@ -175,8 +182,9 @@ static bool s_connected;
 static muse_hatch_vm_t s_vm;       /* cached per-VM credentials */
 static bool s_vm_direct;           /* s_vm.vm_token is the device token itself */
 static char s_host[MUSE_HOST_MAX + 1];
-/* When to connect without a turn asking: once Wi-Fi is up, again with backoff
- * if that fails or the connection drops, not after an idle close. */
+/* When to connect without a turn asking: once Wi-Fi is up, and again with
+ * backoff if that fails or the connection drops. It stays open between turns:
+ * Muse's messages from elsewhere arrive on it (incoming_begin). */
 static int64_t s_auto_next_us;
 static int64_t s_auto_backoff_us = AUTO_RETRY_MIN_US;
 
@@ -624,7 +632,6 @@ static bool flush_outbound(conn_t *c)
             return false;
         }
     }
-    c->last_use_us = now_us();
     return true;
 }
 
@@ -870,7 +877,7 @@ static bool connect_once(char *err, size_t err_cap, int *http_status)
     }
     lwip_fcntl(fd, F_SETFL, lwip_fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     c.next_id = 1;
-    c.last_rx_us = c.last_ping_us = c.last_use_us = now_us();
+    c.last_rx_us = c.last_ping_us = now_us();
     s_connected = true;
     if (!open_subscription()) {
         strlcpy(err, "Subscribe failed", err_cap);
@@ -1015,6 +1022,7 @@ static bool turn_start(uint32_t gen, bool text)
     s_turn.gen = gen;
     s_turn.text = text;
     s_turn.tts_msg = -1;
+    s_incoming = false;   /* a press or typed turn replaces one Muse started */
     memset(s_marks, 0, sizeof(s_marks));
     s_reply_shown[0] = '\0';
     s_turn.start_us = now_us();
@@ -1421,6 +1429,24 @@ static const char *msg_id(cJSON *payload, cJSON *event)
     return id && id[0] ? id : nullptr;
 }
 
+/*
+ * Muse wrote between turns (in the app, or on its own): its message plays as a
+ * reply to a press would. The turn takes the current generation rather than a
+ * new one, so a press racing it (counted in s_gen, its CMD_BEGIN not handled
+ * yet) replaces it instead of being dropped as stale.
+ */
+static void incoming_begin(void)
+{
+    if (!turn_start(s_gen.load(), false)) {
+        return;
+    }
+    ESP_LOGI(TAG, "message from Muse between turns");
+    s_turn.chat_us = s_turn.last_event_us = now_us();
+    s_turn.phase = P_WAIT_REPLY;
+    s_incoming = true;
+    muse_hatch_on_incoming();
+}
+
 static void on_event(cJSON *line)
 {
     if (strcmp(cJSON_GetStringValue(cJSON_GetObjectItem(line, "type")) ?: "", "event") != 0) {
@@ -1434,10 +1460,13 @@ static void on_event(cJSON *line)
         }
         s_last_seq = v > s_last_seq ? v : s_last_seq;
     }
+    const char *event = cJSON_GetStringValue(cJSON_GetObjectItem(line, "event")) ?: "";
+    if (s_turn.phase == P_IDLE && (!strcmp(event, "delta.message_start") || !strcmp(event, "message.assistant"))) {
+        incoming_begin();
+    }
     if (s_turn.phase != P_WAIT_REPLY) {
         return;
     }
-    const char *event = cJSON_GetStringValue(cJSON_GetObjectItem(line, "event")) ?: "";
     cJSON *payload = cJSON_GetObjectItem(line, "payload");
 
     if (!strcmp(event, "agent.status") || !strcmp(event, "task.status")) {
@@ -2067,10 +2096,6 @@ static void hatch_task(void *arg)
         int64_t t = now_us();
         if (t - s_conn.last_rx_us > DEAD_US) {
             drop_connection("server went quiet");
-        } else if (s_turn.phase == P_IDLE && t - s_conn.last_use_us > IDLE_CLOSE_US) {
-            disconnect("idle");
-            muse_hatch_report(MUSE_HATCH_UNTESTED, "");
-            s_auto_next_us = INT64_MAX;   /* the next turn connects */
         } else if (t - s_conn.last_ping_us > PING_US) {
             s_conn.last_ping_us = t;
             if (!ws_send_ping(s_conn.tls)) {
@@ -2209,6 +2234,11 @@ extern "C" void muse_hatch_text_turn(char *text)
 extern "C" void muse_hatch_text_cancel(void)
 {
     post(CMD_TEXT_CANCEL, 0);
+}
+
+extern "C" bool muse_hatch_take_incoming(void)
+{
+    return s_incoming.exchange(false);
 }
 
 extern "C" muse_hatch_ev_t muse_hatch_turn_event(char *text, size_t cap)
